@@ -64,7 +64,14 @@ jobs:
                   return loader.construct_mapping(node, deep=True)
               return None
 
-          for tag in ("!GetAtt", "!Sub", "!Ref", "!Join", "!Split", "!FindInMap"):
+          # Allow-list of CloudFormation YAML tags the inline parser must accept.
+          # Anything not on this list raises ConstructorError and fails the job.
+          # Keep this list aligned with whatever the templates actually use.
+          for tag in (
+              "!GetAtt", "!Sub", "!Ref", "!Join", "!Split", "!FindInMap",
+              "!Select", "!GetAZs", "!Base64", "!Cidr", "!ImportValue",
+              "!Equals", "!And", "!Or", "!Not", "!If", "!Condition",
+          ):
               CfnSafeLoader.add_multi_constructor(tag, _ignore_tag)
 
           paths = [
