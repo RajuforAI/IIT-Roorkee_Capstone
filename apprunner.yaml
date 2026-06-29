@@ -1,0 +1,68 @@
+# ============================================================================
+# AWS App Runner — service configuration
+# ============================================================================
+# File is auto-discovered by App Runner when the service is created with
+# "Use a configuration file" enabled. The values below are the defaults
+# App Runner would otherwise require you to enter in the console.
+#
+# IMPORTANT:
+#   - All secret values are referenced by ARN (Secrets Manager or SSM).
+#   - App Runner resolves the ARNs at task start using its instance role.
+#   - Replace the "000000000000" account ID placeholder with your real
+#     AWS account ID before deploying.
+# ============================================================================
+
+version: 1.0
+runtime: python311
+
+build:
+  commands:
+    pre-build:
+      - pip install --upgrade pip
+    build:
+      - pip install -r requirements.txt
+    post-build:
+      - echo "Build complete at $(date)"
+
+run:
+  runtime: python311
+  command: streamlit run app/main.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
+  network:
+    port: 8501
+    env: tcp
+
+  # ---- Plain (non-secret) environment variables ----
+  env:
+    TELECOM_RAG_APP_ENV:               "production"
+    TELECOM_RAG_LOG_LEVEL:             "INFO"
+    TELECOM_RAG_AWS_DEFAULT_REGION:    "us-east-1"
+    TELECOM_RAG_AWS_S3_BUCKET:         "telegenie-ai-prod-docs"
+    TELECOM_RAG_LLM_PROVIDER_PRIORITY: "openai,gemini"
+    TELECOM_RAG_LLM_MODEL:             "gpt-4o-mini"
+    TELECOM_RAG_EMBEDDING_MODEL:       "text-embedding-3-small"
+    TELECOM_RAG_GEMINI_MODEL:          "gemini-flash-lite-latest"
+    TELECOM_RAG_GEMINI_EMBEDDING_MODEL: "gemini-embedding-001"
+    TELECOM_RAG_LANGCHAIN_TRACING_V2:  "true"
+    TELECOM_RAG_LANGSMITH_PROJECT:     "TeleGenie AI"
+    TELECOM_RAG_LANGSMITH_ENDPOINT:    "https://api.smith.langchain.com"
+    TELECOM_RAG_CHUNK_SIZE:            "1000"
+    TELECOM_RAG_CHUNK_OVERLAP:         "200"
+    TELECOM_RAG_COST_QUOTA_USD_DAILY:  "10"
+    TELECOM_RAG_BOOTSTRAP_ADMIN_PASSWORD: "CHANGE_ME_AT_FIRST_LOGIN"
+
+  # ---- Secret references (resolved by App Runner at task start) ----
+  # These are read from AWS Secrets Manager or SSM Parameter Store.
+  # Update the "000000000000" placeholder with your AWS account ID.
+  secrets:
+    - name: TELECOM_RAG_OPENAI_API_KEY
+      valueFrom: "arn:aws:secretsmanager:us-east-1:000000000000:secret:telegenie/openai-api-key"
+    - name: TELECOM_RAG_GEMINI_API_KEY
+      valueFrom: "arn:aws:secretsmanager:us-east-1:000000000000:secret:telegenie/gemini-api-key"
+    - name: TELECOM_RAG_LANGCHAIN_API_KEY
+      valueFrom: "arn:aws:secretsmanager:us-east-1:000000000000:secret:telegenie/langchain-api-key"
+    - name: TELECOM_RAG_SECRET_KEY
+      valueFrom: "arn:aws:ssm:us-east-1:000000000000:parameter/telegenie/secret-key"
+    - name: TELECOM_RAG_AWS_ACCESS_KEY_ID
+      valueFrom: "arn:aws:ssm:us-east-1:000000000000:parameter/telegenie/aws-access-key-id"
+    - name: TELECOM_RAG_AWS_SECRET_ACCESS_KEY
+      valueFrom: "arn:aws:ssm:us-east-1:000000000000:parameter/telegenie/aws-secret-access-key"

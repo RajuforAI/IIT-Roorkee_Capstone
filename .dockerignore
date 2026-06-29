@@ -1,0 +1,49 @@
+# .dockerignore — keep the build context small and the image free of secrets.
+#
+# Mirrors .gitignore for everything that should never end up in an image.
+# .dockerignore is evaluated by the Docker daemon at build time, BEFORE the
+# first instruction runs, so excluding here is far cheaper than .gitignore
+# being honored later (and .gitignore isn't honored at all by Docker).
+
+# ----- Secrets (the single most important exclusion) -----
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# ----- Virtualenvs and Python caches -----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ----- Build / distribution artifacts -----
+build/
+dist/
+
+# ----- IDE / editor -----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ----- Generated data (regenerable, large) -----
+chroma_db/
+data/synthetic/*.pdf
+checkpoints.db
+
+# ----- Logs -----
+*.log
+
+# ----- Local tooling & VCS -----
+.claude/
+.git/
+.github/
+
+# ----- Issue tracking docs (not needed at runtime) -----
+docs/issues/

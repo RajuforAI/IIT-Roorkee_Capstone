@@ -1,0 +1,150 @@
+# Telecom RAG — pinned Python dependencies.
+#
+# Source of truth: the dep set proven to install + import on Python 3.11
+# during the ingestion session (June 2026).  Any future dep that has no
+# working version compatible with this set is intentionally OMITTED here;
+# add it the moment something actually imports it, not before.
+#
+# Bump deliberately and re-run the verification loop in CLAUDE.md.
+
+# ---- LangChain split-stack (text splitters + core) --------------------
+# The installed langchain-core 1.4.8 (v1 line) is incompatible with
+# the README §3 langgraph==0.2.45 pin (which requires
+# langchain-core<0.4.0).  Issue #7 (2026-06-25) reconciled this by
+# adopting the modern v1 stack: langgraph==1.2.6 + langchain==1.3.11,
+# which are compatible with langchain-core 1.4.8.  See
+# docs/issues/007-multi-agent-langgraph.md and
+# docs/adr/0007-langgraph-v1-stack.md for the full rationale.
+langchain-core==1.4.8
+langchain-openai==1.3.3
+langchain-text-splitters==1.1.2
+langsmith==0.9.0
+langchain==1.3.11
+
+# ---- LangGraph (Issue #7 — multi-agent StateGraph) -------------------
+# langgraph 1.x is the modern line, compatible with the installed
+# langchain-core 1.4.8 stack.  See ADR 0007 for why we adopted v1
+# instead of downgrading the rest of the stack to satisfy the
+# README §3 langgraph==0.2.45 pin.
+langgraph==1.2.6
+langgraph-checkpoint-sqlite==3.0.3
+# Postgres checkpointer (Issue #11): production-grade multi-worker /
+# multi-process checkpointer replacing SqliteSaver.  The
+# ``psycopg[binary]`` extra bundles libpq on Windows so a clean
+# Windows install works without a Postgres dev kit in PATH; on
+# Linux the binary wheel is used directly.  See
+# docs/issues/011-postgres-checkpointer.md.
+langgraph-checkpoint-postgres==3.1.0
+psycopg[binary]==3.2.3
+
+# ---- LangChain Chroma + community (added 2026-06-23 for Issue #5) ----
+# Added when telecom_rag/tools/retrieval.py was implemented and needed
+# the LangChain `Chroma` wrapper (max_marginal_relevance_search and
+# similarity_search_with_score).  langchain-chroma==1.1.0 and
+# langchain-community==0.4.2 are compatible with langchain-core==1.4.x
+# (the comment above about langchain 0.3.x incompatibility applied to
+# the unified langchain meta-package, not to these standalone
+# integration packages).  Issue #7 (multi-agent LangGraph) will pin
+# the rest of the LangGraph stack and reconcile the README §3 version
+# table against this dep set.
+langchain-chroma==1.1.0
+langchain-community==0.4.2
+
+# ---- Vector store -----------------------------------------------------
+# chromadb 1.5.x is required: the 0.5.x line rejects some metadata
+# coercions the embedder relies on (see _normalize_for_chroma in
+# telecom_rag/ingestion/embedder.py).
+chromadb==1.5.9
+
+# ---- LLM providers ----------------------------------------------------
+# OpenAI: primary.  GEMINI_API_KEY in .env triggers fallback layer.
+openai==2.43.0
+
+# ---- Pydantic (settings + schemas) ------------------------------------
+pydantic==2.13.4
+pydantic-settings==2.14.2
+
+# ---- PDF ingestion ----------------------------------------------------
+# pypdf 6.x is required: the 5.x line throws on some recent PDF metadata.
+pypdf==6.14.1
+
+# ---- Misc -------------------------------------------------------------
+python-dotenv==1.0.1
+tenacity==9.1.4
+PyYAML==6.0.2
+
+# ---- Streamlit chat page (Issue #5 AC1) -------------------------------
+# Pin added for Issue #5 AC1 (Streamlit chat page).  NOTE: installing
+# streamlit-authenticator 0.3.2 (Issue #7 AC9) bumps streamlit from
+# 1.39.0 to >=1.25.0; pip resolves to the latest stable (1.58.0 at
+# install time).  The Docker image picks up the bumped version.
+streamlit==1.39.0
+
+# ---- RAGAS evaluation harness (Issue #9) ----------------------------
+# Offline evaluation loop that runs the golden Q&A set through the
+# full graph and emits the four RAGAS metrics plus the per-query
+# ValidationAgent.grade_faithfulness correlation (AC8).  CI integration
+# is deferred to follow-up Issue #10 — this pin is the offline/on-
+# demand entry point only.  0.2.6 is the README §3 pin, verified
+# resolvable on PyPI; staying on 0.2.6 (not 0.4.x) keeps the
+# ragas.evaluate(...) API surface narrow and matches the contract
+# in docs/issues/009-ragas-evaluation-harness.md.
+# See docs/issues/009-ragas-evaluation-harness.md.
+ragas==0.2.6
+# ---- Streamlit auth gate (Issue #7 AC9) -------------------------------
+# streamlit-authenticator: login widget for the auth gate in
+# app/main.py per README §9.1.  Pinned to the version verified
+# installable alongside langchain 1.3.x.  bcrypt is a transitive dep
+# of streamlit-authenticator, but app/main.py hashes the dev password
+# with bcrypt directly to avoid coupling to the package's internal
+# ``utilities.hasher.Hasher`` API, so it is pinned explicitly here.
+streamlit-authenticator==0.3.2
+bcrypt==5.0.0
+
+# ---- Synthetic data generator (reportlab) -----------------------------
+reportlab==5.0.0
+
+# ---- Optional: Gemini fallback provider -------------------------------
+# Migrated from the EOL'd `google-generativeai` SDK to `google-genai`
+# per Issue #8 (2026-06-25); the legacy SDK reached end-of-life and
+# surfaced a FutureWarning on every import.  The new SDK uses a
+# `Client` model instead of `GenerativeModel` + free `embed_content`.
+# See docs/issues/008-google-genai-migration.md for full rationale.
+#
+# telecom_rag.llm imports this lazily (inside the function that needs
+# it), so it isn't required at package-import time.  It IS installed
+# in the Docker image because the documented runtime path is
+# "OpenAI fails -> Gemini takes over" and that path must work from a
+# fresh container with no extra `pip install` step.
+google-genai==1.52.0
+
+# ---- AWS SDK (Issue #12 — S3 upload path) -----------------------------
+# Pinned to the README §3 version (1.35.45).  The S3 upload helper
+# in ``telecom_rag.storage.s3`` is a lazy import — the rest of the
+# app does not require boto3 unless the upload page actually PUTs
+# a file.  We install it in the Docker image because the documented
+# runtime path is "upload a PDF → it lands in S3 for backup" and
+# that path must work from a fresh container with no extra step.
+# See docs/issues/012-s3-upload-path.md.
+boto3==1.35.45
+
+# ---- /healthz endpoint (Issue #14 — observability smoke test) --------
+# ``starlette`` powers the Starlette ASGI app that serves ``/_healthz``
+# from ``telecom_rag.observability.health``. ``uvicorn`` is the ASGI
+# server the production smoke job binds to (CI runs the same entrypoint:
+# ``uvicorn telecom_rag.observability.health:app --port 8502``).
+#
+# Both are installed transitively today (``streamlit`` pulls starlette,
+# ``chromadb + streamlit`` pull uvicorn) — but pinning them explicitly
+# is the difference between a silent breaking-change when one of
+# those deps drops the transit, and an install-time failure that
+# the requirements.txt user catches immediately. The lazy-import guard
+# in health.py (Starlette = None on ImportError) means a missing
+# starlette surfaces ONLY on the first HTTP request to ``/_healthz``
+# — exactly when an ALB is checking liveness. Pin it.
+#
+# Versions verified to install + import on Python 3.11 against the
+# Issue #13 dependency set (langchain 1.3.x, langgraph 1.2.x).
+# See docs/issues/014-healthz-in-ci.md.
+starlette==1.3.1
+uvicorn==0.49.0

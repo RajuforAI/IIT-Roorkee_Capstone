@@ -1,0 +1,548 @@
+# ============================================================================
+# AWS CloudFormation — TeleGenie AI on ECS Fargate
+# ============================================================================
+# Path B of the AWS deployment. Provisions:
+#   - VPC with 2 public + 2 private subnets
+#   - ALB with HTTPS listener (ACM cert required)
+#   - ECS Cluster + Fargate Service (desired count 2)
+#   - Task Definition (1 vCPU / 3 GB, port 8501)
+#   - Security Groups (least-privilege)
+#   - CloudWatch Log Group
+#   - IAM Task Role + Execution Role
+#   - S3 Bucket for PDF uploads
+#   - Secrets Manager + SSM Parameter Store references
+#
+# Deploy:
+#   aws cloudformation deploy \
+#     --template-file cloudformation/template.yaml \
+#     --stack-name telegenie-ai-prod \
+#     --capabilities CAPABILITY_IAM \
+#     --parameter-overrides \
+#         EnvironmentName=production \
+#         ImageUri=123456789012.dkr.ecr.us-east-1.amazonaws.com/telegenie-ai:latest \
+#         DomainName=telegenie.example.com \
+#         CertificateArn=arn:aws:acm:us-east-1:123456789012:certificate/xxxxx
+# ============================================================================
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "TeleGenie AI - ECS Fargate deployment (Path B fallback)"
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, dev]
+    Description: Environment name (used in resource tagging and naming)
+
+  ImageUri:
+    Type: String
+    Description: ECR image URI (e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/telegenie-ai:latest)
+
+  ContainerPort:
+    Type: Number
+    Default: 8501
+    Description: Streamlit port (must match Dockerfile EXPOSE)
+
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+    Description: Number of ECS Fargate tasks to run
+
+  DomainName:
+    Type: String
+    Default: telegenie.example.com
+    Description: Public domain name (CNAME the ALB DNS to this)
+
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN for the domain (must be in the same region)
+
+  AwsAccountId:
+    Type: String
+    Description: AWS account ID (12 digits, used for ARN construction)
+
+Resources:
+  # --------------------------------------------------------------------------
+  # VPC + subnets + NAT
+  # --------------------------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-vpc-${EnvironmentName}
+        - Key: Project
+          Value: telegenie-ai
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-public-1-${EnvironmentName}
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-public-2-${EnvironmentName}
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-private-1-${EnvironmentName}
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.20.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-private-2-${EnvironmentName}
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-igw-${EnvironmentName}
+
+  GatewayAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-public-rt-${EnvironmentName}
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttach
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttach
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-private-rt-${EnvironmentName}
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # --------------------------------------------------------------------------
+  # Security Groups
+  # --------------------------------------------------------------------------
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB ingress (HTTPS from internet)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-alb-sg-${EnvironmentName}
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS task ingress (Streamlit from ALB only)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8501
+          ToPort: 8501
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub telegenie-task-sg-${EnvironmentName}
+
+  # --------------------------------------------------------------------------
+  # S3 bucket for PDF uploads
+  # --------------------------------------------------------------------------
+  DocsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub telegenie-ai-${EnvironmentName}-docs-${AwsAccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
+      Tags:
+        - Key: Project
+          Value: telegenie-ai
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Log Group
+  # --------------------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/telegenie-ai-${EnvironmentName}
+      RetentionInDays: 30
+
+  # --------------------------------------------------------------------------
+  # IAM — Execution Role (used by ECS to pull image + read secrets)
+  # --------------------------------------------------------------------------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadSecrets
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:aws:secretsmanager:*:*:secret:telegenie/*
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:*:*:parameter/telegenie/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt LogGroup.Arn
+
+  # --------------------------------------------------------------------------
+  # IAM — Task Role (used by app at runtime to call S3, etc.)
+  # --------------------------------------------------------------------------
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppRuntime
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !GetAtt DocsBucket.Arn
+                  - !Sub ${DocsBucket.Arn}/*
+
+  # --------------------------------------------------------------------------
+  # ECS Cluster
+  # --------------------------------------------------------------------------
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub telegenie-cluster-${EnvironmentName}
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+  # --------------------------------------------------------------------------
+  # Task Definition
+  # --------------------------------------------------------------------------
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub telegenie-ai-${EnvironmentName}
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "1024"
+      Memory: "3072"
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: telegenie-ai
+          Image: !Ref ImageUri
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: telegenie
+          Environment:
+            - Name: TELECOM_RAG_APP_ENV
+              Value: !Ref EnvironmentName
+            - Name: TELECOM_RAG_LOG_LEVEL
+              Value: INFO
+            - Name: TELECOM_RAG_AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+            - Name: TELECOM_RAG_AWS_S3_BUCKET
+              Value: !Ref DocsBucket
+          Secrets:
+            - Name: TELECOM_RAG_OPENAI_API_KEY
+              ValueFrom: !Sub arn:aws:secretsmanager:${AWS::Region}:${AwsAccountId}:secret:telegenie/openai-api-key
+            - Name: TELECOM_RAG_GEMINI_API_KEY
+              ValueFrom: !Sub arn:aws:secretsmanager:${AWS::Region}:${AwsAccountId}:secret:telegenie/gemini-api-key
+            - Name: TELECOM_RAG_LANGCHAIN_API_KEY
+              ValueFrom: !Sub arn:aws:secretsmanager:${AWS::Region}:${AwsAccountId}:secret:telegenie/langchain-api-key
+            - Name: TELECOM_RAG_SECRET_KEY
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AwsAccountId}:parameter/telegenie/secret-key
+            - Name: TELECOM_RAG_AWS_ACCESS_KEY_ID
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AwsAccountId}:parameter/telegenie/aws-access-key-id
+            - Name: TELECOM_RAG_AWS_SECRET_ACCESS_KEY
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AwsAccountId}:parameter/telegenie/aws-secret-access-key
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "python -c \"from telecom_rag.config import settings; print(settings.llm_model)\" || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          User: "10001:10001"
+          ReadonlyRootFilesystem: false
+
+  # --------------------------------------------------------------------------
+  # ALB
+  # --------------------------------------------------------------------------
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub telegenie-alb-${EnvironmentName}
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Project
+          Value: telegenie-ai
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub telegenie-tg-${EnvironmentName}
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: ip
+      HealthCheckPath: /_stcore/health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200
+
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            StatusCode: HTTP_301
+
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # --------------------------------------------------------------------------
+  # ECS Service
+  # --------------------------------------------------------------------------
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListenerHTTPS
+    Properties:
+      ServiceName: !Sub telegenie-service-${EnvironmentName}
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref TaskSecurityGroup
+          AssignPublicIp: ENABLED
+      LoadBalancers:
+        - ContainerName: telegenie-ai
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref ALBTargetGroup
+      Tags:
+        - Key: Project
+          Value: telegenie-ai
+
+  # --------------------------------------------------------------------------
+  # Auto-scaling
+  # --------------------------------------------------------------------------
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Sub service/${Cluster}/${Service.Name}
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: 1
+      MaxCapacity: 10
+      RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+
+  CPUScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: CPUScaling
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+Outputs:
+  ALBDNSName:
+    Description: Public ALB DNS — point your domain here
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-ALBDNSName
+
+  DocsBucketName:
+    Description: S3 bucket for PDF uploads
+    Value: !Ref DocsBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-DocsBucket
+
+  ServiceName:
+    Description: ECS service name
+    Value: !GetAtt Service.Name
+    Export:
+      Name: !Sub ${AWS::StackName}-Service
+
+  ClusterName:
+    Description: ECS cluster name
+    Value: !Ref Cluster
+    Export:
+      Name: !Sub ${AWS::StackName}-Cluster
+
+  LogGroupName:
+    Description: CloudWatch log group
+    Value: !Ref LogGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-LogGroup

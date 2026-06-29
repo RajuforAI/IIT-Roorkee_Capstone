@@ -1,0 +1,85 @@
+# =============================================================================
+# TeleGenie AI — IIT Roorkee Capstone — .gitignore
+# =============================================================================
+# Every entry below protects something that MUST NOT land in a public repo:
+# secrets, runtime state, build artifacts, IDE cruft, or per-machine caches.
+# The capstone repo is a clean public snapshot; everything generated at
+# install/run time belongs here.
+# =============================================================================
+
+# ---- Secrets & credentials (NEVER commit) ---------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+config/secrets.*
+.streamlit/secrets.toml
+
+# ---- Runtime state (generated at first run) -------------------------------
+auth.db
+*.sqlite
+*.sqlite3
+checkpoints.db
+chroma_db/
+data/uploads/
+logs/
+*.log
+*.jsonl
+
+# ---- Python build artifacts -----------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache
+
+# ---- Virtual environments --------------------------------------------------
+venv/
+.venv/
+env/
+ENV/
+
+# ---- IDE / editor ----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Docker ----------------------------------------------------------------
+.dockerignore.bak
+
+# ---- Local scripts that should not be public -------------------------------
+scripts/local/
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+.aws/
+
+# ---- Test artifacts (regenerated on demand) --------------------------------
+.pytest_cache/
+test-results/
+playwright-report/
+playwright/.cache/
+
+# ---- OS noise --------------------------------------------------------------
+.Trashes
+Desktop.ini

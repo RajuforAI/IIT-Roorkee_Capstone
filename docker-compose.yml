@@ -1,0 +1,84 @@
+# docker-compose.yml — local dev orchestration.
+#
+# Three services:
+#   - app:      the Telecom RAG Python image, default command is a smoke
+#               test; override the command to run the Streamlit server once
+#               Issue #5 lands.
+#   - chroma:   a persistent ChromaDB server reachable by hostname `chroma`.
+#               App code passes `host=chroma, port=8000` when the API is
+#               used in client/server mode (today the project uses an
+#               in-process PersistentClient; this gives us a swap-in target).
+#   - postgres: a Postgres 16 server reachable by hostname `postgres`
+#               (port 5432). Hosts the production LangGraph checkpointer
+#               tables for multi-worker / multi-process deployments (Issue
+#               #11). Default DSN: `postgresql://telecom:devpassword@postgres:5432/telecom_checkpoints`.
+#
+# Named volumes (`chroma_data`, `postgres_data`) persist state across
+# `down/up` cycles; without them, every restart wipes ingested chunks
+# and LangGraph thread state.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telecom-rag:local
+    container_name: telecom-rag-app
+    # Pass secrets via the host .env file.  Never bake them into the image.
+    env_file:
+      - .env
+    # Drop privileges; matches the Dockerfile's USER directive.
+    user: "10001:10001"
+    ports:
+      - "8501:8501"   # Streamlit (when Issue #5 lands)
+    depends_on:
+      chroma:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    # Restart unless explicitly stopped.  Useful during dev when the host
+    # daemon restarts; remove in production.
+    restart: unless-stopped
+    # To run the Streamlit server: `docker compose run --rm -p 8501:8501
+    # app streamlit run app.py --server.port=8501 --server.address=0.0.0.0`
+
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: telecom-rag-chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      # Chroma's server entrypoint expects these; values can stay as
+      # placeholders for local dev.
+      - CHROMA_SERVER_AUTHN_CREDENTIALS=
+      - CHROMA_SERVER_AUTHN_PROVIDER=
+      - PERSIST_DIRECTORY=/chroma/chroma
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: telecom-rag-postgres
+    environment:
+      # Local-dev credentials only.  Production deploys should swap
+      # POSTGRES_PASSWORD for a secret and not expose port 5432.
+      - POSTGRES_USER=telecom
+      - POSTGRES_PASSWORD=devpassword
+      - POSTGRES_DB=telecom_checkpoints
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"   # local-dev only; remove for production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telecom"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  chroma_data:
+    name: telecom-rag-chroma-data
+  postgres_data:
+    name: telecom-rag-postgres-data
