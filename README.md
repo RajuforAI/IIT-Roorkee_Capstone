@@ -11,6 +11,8 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![AWS App Runner](https://img.shields.io/badge/AWS-App_Runner-FF9900?logo=amazonaws&logoColor=white)](https://aws.amazon.com/apprunner/)
 
+[![CI](https://github.com/RajuforAI/IIT-Roorkee_Capstone/actions/workflows/ci.yml/badge.svg)](https://github.com/RajuforAI/IIT-Roorkee_Capstone/actions/workflows/ci.yml)
+
 ---
 
 ## 1. Product Overview

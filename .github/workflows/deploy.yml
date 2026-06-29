@@ -1,0 +1,149 @@
+# ============================================================================
+# Deploy workflow — build, push, and roll App Runner on push to main
+# ============================================================================
+# Runs on: push to main ONLY (PRs do not deploy)
+# Jobs:
+#   1. build-and-push-image  -> docker build -> ECR push (tagged + :latest)
+#   2. deploy-apprunner      -> aws apprunner update-service with new image
+#
+# REQUIRED GitHub repo secrets (Settings -> Secrets -> Actions):
+#   - AWS_DEPLOY_ROLE_ARN : IAM role ARN trusted for GitHub OIDC,
+#                           with policies for `ecr:*` and `apprunner:*`.
+#   - APPRUNNER_SERVICE_ARN : The App Runner service ARN created from
+#                            `apprunner.yaml` (the deploy target).
+#   - ECR_REPOSITORY       : The ECR repository name (just the repo name,
+#                            e.g. "telegenie-ai").  The registry host is
+#                            derived from `aws sts get-caller-identity`
+#                            at runtime.
+#
+# Notes:
+#   - Secrets (OPENAI_API_KEY, GEMINI_API_KEY, LANGCHAIN_API_KEY,
+#     SECRET_KEY, AWS keys) are already configured at the App Runner
+#     service level via Secrets Manager / SSM Parameter Store (see
+#     `apprunner.yaml` + `AWS_DEPLOYMENT.md` §5).  This workflow
+#     intentionally redeclares ONLY non-secret runtime env vars in the
+#     update-service call so the existing secret ARN references are
+#     preserved across deploys.
+# ============================================================================
+
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-push-image:
+    name: Build and push Docker image to ECR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    outputs:
+      image_uri: ${{ steps.build-meta.outputs.image_uri }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Resolve AWS account ID and ECR registry host
+        id: aws-account-id
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "account=${ACCOUNT_ID}" >> "$GITHUB_OUTPUT"
+          echo "registry=${ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.aws-account-id.outputs.registry }}
+        run: |
+          aws ecr get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Build Docker image
+        run: docker build -t telegenie-ai:${{ github.sha }} .
+
+      - name: Tag image for ECR
+        env:
+          ECR_REGISTRY: ${{ steps.aws-account-id.outputs.registry }}
+        run: |
+          docker tag telegenie-ai:${{ github.sha }} \
+            "$ECR_REGISTRY/telegenie-ai:${{ github.sha }}"
+          docker tag telegenie-ai:${{ github.sha }} \
+            "$ECR_REGISTRY/telegenie-ai:latest"
+
+      - name: Push image to ECR (commit-sha + latest)
+        env:
+          ECR_REGISTRY: ${{ steps.aws-account-id.outputs.registry }}
+        run: |
+          docker push "$ECR_REGISTRY/telegenie-ai:${{ github.sha }}"
+          docker push "$ECR_REGISTRY/telegenie-ai:latest"
+
+      - name: Record image URI for downstream job
+        id: build-meta
+        env:
+          ECR_REGISTRY: ${{ steps.aws-account-id.outputs.registry }}
+        run: |
+          URI="${ECR_REGISTRY}/telegenie-ai:${{ github.sha }}"
+          echo "image_uri=${URI}" >> "$GITHUB_OUTPUT"
+
+  deploy-apprunner:
+    name: Deploy to AWS App Runner
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Update App Runner service with new image
+        env:
+          IMAGE_URI: ${{ needs.build-and-push-image.outputs.image_uri }}
+          SERVICE_ARN: ${{ secrets.APPRUNNER_SERVICE_ARN }}
+        # Only NON-SECRET runtime env vars are redeclared here.  The
+        # App Runner service already has the secret values wired up via
+        # Secrets Manager / SSM Parameter Store references in
+        # `apprunner.yaml`; re-declaring those here would overwrite the
+        # ARN references with literal values and break the secret
+        # resolution at task start.
+        run: |
+          SOURCE_CONFIG=$(python - <<PY
+          import json
+          cfg = {
+              "ImageRepository": {
+                  "ImageIdentifier": "${IMAGE_URI}",
+                  "ImageConfiguration": {
+                      "RuntimeEnvironmentVariables": [
+                          {"Name": "TELECOM_RAG_APP_ENV",            "Value": "production"},
+                          {"Name": "TELECOM_RAG_LOG_LEVEL",          "Value": "INFO"},
+                          {"Name": "TELECOM_RAG_AWS_DEFAULT_REGION", "Value": "us-east-1"},
+                          {"Name": "TELECOM_RAG_AWS_S3_BUCKET",      "Value": "telegenie-ai-prod-docs"},
+                          {"Name": "TELECOM_RAG_LLM_MODEL",          "Value": "gpt-4o-mini"},
+                          {"Name": "TELECOM_RAG_EMBEDDING_MODEL",    "Value": "text-embedding-3-small"},
+                          {"Name": "TELECOM_RAG_LANGSMITH_PROJECT",  "Value": "TeleGenie AI"},
+                          {"Name": "TELECOM_RAG_LANGSMITH_ENDPOINT", "Value": "https://api.smith.langchain.com"},
+                      ],
+                  },
+                  "ImageRepositoryType": "ECR",
+              },
+          }
+          print(json.dumps(cfg))
+          PY
+          )
+          aws apprunner update-service \
+            --service-arn "${SERVICE_ARN}" \
+            --source-configuration "${SOURCE_CONFIG}"

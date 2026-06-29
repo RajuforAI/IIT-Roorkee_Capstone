@@ -20,8 +20,13 @@
 #     --parameter-overrides \
 #         EnvironmentName=production \
 #         ImageUri=123456789012.dkr.ecr.us-east-1.amazonaws.com/telegenie-ai:latest \
-#         DomainName=telegenie.example.com \
 #         CertificateArn=arn:aws:acm:us-east-1:123456789012:certificate/xxxxx
+#
+# NOTE: The public domain name (e.g. telegenie.example.com) is intentionally NOT a
+# template parameter. The domain -> ALB-DNS CNAME mapping is an external concern
+# (Route 53 hosted zone or your registrar), not a CloudFormation concern. After
+# this stack creates the ALB, point your DNS A-record (alias) at the ALBDNSName
+# output below.
 # ============================================================================
 
 AWSTemplateFormatVersion: "2010-09-09"
@@ -49,11 +54,6 @@ Parameters:
     MinValue: 1
     MaxValue: 10
     Description: Number of ECS Fargate tasks to run
-
-  DomainName:
-    Type: String
-    Default: telegenie.example.com
-    Description: Public domain name (CNAME the ALB DNS to this)
 
   CertificateArn:
     Type: String
@@ -241,6 +241,11 @@ Resources:
   # --------------------------------------------------------------------------
   DocsBucket:
     Type: AWS::S3::Bucket
+    # Stateful: keep the bucket (and its versioning history) on stack delete or replace.
+    # Use Retain (not Snapshot) because versioning is already enabled and we want the
+    # bucket itself preserved as a forensic/recovery artifact.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub telegenie-ai-${EnvironmentName}-docs-${AwsAccountId}
       PublicAccessBlockConfiguration:
@@ -264,6 +269,9 @@ Resources:
   # --------------------------------------------------------------------------
   LogGroup:
     Type: AWS::Logs::LogGroup
+    # Stateful: retain audit log history on stack delete or replace.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       LogGroupName: !Sub /ecs/telegenie-ai-${EnvironmentName}
       RetentionInDays: 30
@@ -290,13 +298,13 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
-                  - !Sub arn:aws:secretsmanager:*:*:secret:telegenie/*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:*:*:secret:telegenie/*
               - Effect: Allow
                 Action:
                   - ssm:GetParameters
                   - ssm:GetParameter
                 Resource:
-                  - !Sub arn:aws:ssm:*:*:parameter/telegenie/*
+                  - !Sub arn:${AWS::Partition}:ssm:*:*:parameter/telegenie/*
               - Effect: Allow
                 Action:
                   - logs:CreateLogStream
@@ -348,6 +356,9 @@ Resources:
   # --------------------------------------------------------------------------
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
+    # Stateful: keep old task-definition revisions for forensic/history purposes.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Family: !Sub telegenie-ai-${EnvironmentName}
       NetworkMode: awsvpc
@@ -467,6 +478,14 @@ Resources:
   # --------------------------------------------------------------------------
   Service:
     Type: AWS::ECS::Service
+    # Stateful (running workloads carry session state & target-group attachments),
+    # but DeletionPolicy/UpdateReplacePolicy are intentionally NOT set:
+    #   - Setting DeletionPolicy: Retain on an ECS Service blocks the normal ECS
+    #     service-update path during stack updates (CFN refuses to delete the old
+    #     service), so we back off here per the project's hardening guidance.
+    #   - The default DeletionPolicy (Delete) lets stack teardown clean up the
+    #     running tasks gracefully, which is the desired behavior for an ephemeral
+    #     service resource even though it is technically stateful.
     DependsOn: ALBListenerHTTPS
     Properties:
       ServiceName: !Sub telegenie-service-${EnvironmentName}
@@ -501,7 +520,7 @@ Resources:
       ScalableDimension: ecs:service:DesiredCount
       MinCapacity: 1
       MaxCapacity: 10
-      RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+      RoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
 
   CPUScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy

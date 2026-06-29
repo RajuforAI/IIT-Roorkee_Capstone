@@ -1,0 +1,101 @@
+# ============================================================================
+# CI workflow — lint + validate on every push / PR to main
+# ============================================================================
+# Runs on: push to main, pull_request to main
+# Job:     lint-and-validate
+# Steps:   compile (app + telecom_rag) -> YAML validation -> secret scan -> CFN lint
+# ============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  lint-and-validate:
+    name: Lint and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile check (app + telecom_rag)
+        run: python -m compileall -q app telecom_rag
+
+      - name: Install pyyaml for config validation
+        run: pip install pyyaml
+
+      - name: Validate YAML configs (apprunner, compose, CloudFormation)
+        # The CFN template uses !GetAtt and !Sub intrinsic functions.
+        # pyyaml.SafeLoader rejects those by default; we register no-op
+        # constructors so the template parses as plain YAML.
+        run: |
+          python - <<'PY'
+          import sys
+          import yaml
+
+          class CfnSafeLoader(yaml.SafeLoader):
+              pass
+
+          def _ignore_tag(loader, tag_suffix, node):
+              if isinstance(node, yaml.ScalarNode):
+                  return loader.construct_scalar(node)
+              if isinstance(node, yaml.SequenceNode):
+                  return loader.construct_sequence(node, deep=True)
+              if isinstance(node, yaml.MappingNode):
+                  return loader.construct_mapping(node, deep=True)
+              return None
+
+          for tag in ("!GetAtt", "!Sub", "!Ref", "!Join", "!Split", "!FindInMap"):
+              CfnSafeLoader.add_multi_constructor(tag, _ignore_tag)
+
+          paths = [
+              "apprunner.yaml",
+              "docker-compose.yml",
+              "cloudformation/template.yaml",
+          ]
+          for p in paths:
+              with open(p, "r", encoding="utf-8") as fh:
+                  loader = CfnSafeLoader if p.endswith(".template.yaml") or "cloudformation" in p else yaml.SafeLoader
+                  yaml.load(fh, Loader=loader)
+              print(f"OK: {p}")
+          PY
+
+      - name: Secret scan (block on any leaked credentials)
+        # grep returns non-zero exit when a pattern matches; the `|| exit 1`
+        # converts that into a failed job step.  Patterns cover OpenAI keys,
+        # GitHub PATs, AWS access keys, and the Capstone@2026 placeholder.
+        run: |
+          if grep -rEn "sk-[A-Za-z0-9]{32,}|ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}|Capstone@2026" . \
+              --exclude-dir=.git \
+              --exclude-dir=.github \
+              --exclude-dir=node_modules \
+              --exclude-dir=.venv; then
+            echo "ERROR: secret pattern detected in working tree"
+            exit 1
+          fi
+          echo "OK: no secret patterns detected"
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      - name: cfn-lint CloudFormation template
+        run: python -m cfnlint cloudformation/template.yaml
