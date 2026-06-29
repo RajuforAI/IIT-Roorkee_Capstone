@@ -99,8 +99,9 @@ class Finding:
         in a user-facing surface — use :attr:`redacted` for that.
     redacted:
         A safe-to-render representation of the match with the
-        sensitive middle portion masked. E.g. an AWS key
-        ``AKIAIOSFODNN7EXAMPLE`` becomes ``AKIA****MPLE``.
+        sensitive middle portion masked. E.g. an AWS-style access
+        key id like ``AKIA****MPLE`` is shown with the inner
+        characters masked.
     page_number:
         1-indexed page number where the match was found. ``None``
         when scanning raw text via :func:`scan_text` (no page

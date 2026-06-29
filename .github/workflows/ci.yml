@@ -91,11 +91,28 @@ jobs:
         # converts that into a failed job step.  Patterns cover OpenAI keys,
         # GitHub PATs, AWS access keys, and the Capstone@2026 placeholder.
         run: |
-          if grep -rEn "sk-[A-Za-z0-9]{32,}|ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}|Capstone@2026" . \
+          # Patterns:
+          #   sk-            -> OpenAI secret key (sk-<48+ base64 chars>)
+          #   ghp_           -> GitHub classic PAT (ghp_<36 alnum>)
+          #   AKIA + 16 caps -> AWS access key id
+          #   Capstone@2026  -> the placeholder password used in setup docs
+          # We grep twice: once for everything, then a second pass that
+          # subtracts the well-known AWS example key string so docstrings
+          # can refer to it without tripping the scanner.  Skips Python
+          # bytecode caches and the .git history directory.
+          HITS=$(
+            grep -rEn "sk-[A-Za-z0-9]{32,}|ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}|Capstone@2026" . \
               --exclude-dir=.git \
               --exclude-dir=.github \
               --exclude-dir=node_modules \
-              --exclude-dir=.venv; then
+              --exclude-dir=.venv \
+              --exclude-dir=__pycache__ \
+            | grep -v "AKIAIOSFODNN7EXAMPLE" \
+            || true
+          )
+          if [ -n "$HITS" ]; then
+            echo "$HITS"
+            echo ""
             echo "ERROR: secret pattern detected in working tree"
             exit 1
           fi
@@ -105,4 +122,9 @@ jobs:
         run: pip install cfn-lint
 
       - name: cfn-lint CloudFormation template
-        run: python -m cfnlint cloudformation/template.yaml
+        # Install cfn-lint in this step so the binary is on PATH, then run
+        # it directly.  Avoids the python -m cfnlint quirk on some Python
+        # versions where the package doesn't expose __main__.
+        run: |
+          pip install --quiet cfn-lint
+          cfn-lint cloudformation/template.yaml

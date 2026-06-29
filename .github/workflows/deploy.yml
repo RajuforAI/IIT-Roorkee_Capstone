@@ -1,7 +1,10 @@
 # ============================================================================
-# Deploy workflow — build, push, and roll App Runner on push to main
+# Deploy workflow — build, push, and roll App Runner on a release tag
 # ============================================================================
-# Runs on: push to main ONLY (PRs do not deploy)
+# Runs on: push of a `v*` tag (e.g. v1.0.0).  PRs and pushes to main
+# do NOT deploy — the CI workflow handles those.  Tagging a release is
+# the explicit "ship it" gesture.
+#
 # Jobs:
 #   1. build-and-push-image  -> docker build -> ECR push (tagged + :latest)
 #   2. deploy-apprunner      -> aws apprunner update-service with new image
@@ -11,10 +14,6 @@
 #                           with policies for `ecr:*` and `apprunner:*`.
 #   - APPRUNNER_SERVICE_ARN : The App Runner service ARN created from
 #                            `apprunner.yaml` (the deploy target).
-#   - ECR_REPOSITORY       : The ECR repository name (just the repo name,
-#                            e.g. "telegenie-ai").  The registry host is
-#                            derived from `aws sts get-caller-identity`
-#                            at runtime.
 #
 # Notes:
 #   - Secrets (OPENAI_API_KEY, GEMINI_API_KEY, LANGCHAIN_API_KEY,
@@ -30,8 +29,11 @@ name: Deploy
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
+    # Branches are intentionally NOT listed here.  Deploying on every push
+    # to main would burn AWS quota and run before the secrets are wired
+    # up.  Tagging a release is the explicit ship-it gesture.
 
 permissions:
   id-token: write
